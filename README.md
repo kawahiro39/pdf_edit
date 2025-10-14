@@ -4,7 +4,7 @@
 
 ## 主な特徴
 - `pdf2image` と `Pillow` を利用した高品質なPDF→JPEG変換
-- 1ページずつのマルチパートレスポンス、またはZIPアーカイブでの一括ダウンロードに対応
+- 1ページずつのマルチパートレスポンス、ZIPアーカイブでの一括ダウンロード、Base64エンコードされたJSONレスポンスに対応
 - DockerfileとCloud Runマニフェストを同梱し、Google Cloud Runへのデプロイを容易に実行可能
 - `/healthz` エンドポイントでのヘルスチェックに対応
 
@@ -37,6 +37,24 @@
    ```
    ZIPには `page-1.jpg` のようにページごとのファイルが含まれます。
 
+4. JSON形式で受け取りたい場合は、`Accept` ヘッダーまたは `response_format=json` を指定します。各ページはBase64文字列として含まれます。
+   ```bash
+   curl -X POST \
+     -H "Accept: application/json" \
+     -F "file=@example.pdf;type=application/pdf" \
+     "http://localhost:8080/convert?response_format=json"
+   ```
+   レスポンスは以下のような配列です。
+   ```json
+   [
+     {
+       "page": 1,
+       "filename": "page-1.jpg",
+       "data": "<Base64エンコードされたJPEG>"
+     }
+   ]
+   ```
+
 ## API 仕様
 ### `POST /convert`
 - リクエスト形式: `multipart/form-data`
@@ -44,6 +62,7 @@
 - レスポンス:
   - 既定: `multipart/mixed`、各パートがJPEG画像
   - `Accept: application/zip` もしくは `response_format=zip` 指定時: `application/zip`
+  - `Accept: application/json` もしくは `response_format=json` 指定時: JSON配列（各要素にページ番号・ファイル名・Base64データを含む）
 - エラー: PDF以外のファイル、または空ファイルを送信した場合はHTTP 400を返します。
 
 ### `GET /healthz`

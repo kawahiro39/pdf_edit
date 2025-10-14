@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Iterable
@@ -8,7 +9,7 @@ import uuid
 import zipfile
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pdf2image import convert_from_path
 
 app = FastAPI(title="PDF to JPEG service")
@@ -85,6 +86,18 @@ def _wants_zip(response_format: str | None, accept_header: str | None) -> bool:
     return False
 
 
+def _wants_json(response_format: str | None, accept_header: str | None) -> bool:
+    if response_format:
+        return response_format.lower() == "json"
+    if not accept_header:
+        return False
+    for item in accept_header.split(","):
+        media_type = item.split(";")[0].strip().lower()
+        if media_type == "application/json":
+            return True
+    return False
+
+
 async def _write_upload_to_tempfile(upload: UploadFile) -> str:
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         while True:
@@ -113,7 +126,9 @@ async def convert_pdf(
 
     temp_images = TemporaryDirectory()
     boundary = f"{BOUNDARY_PREFIX}-{uuid.uuid4().hex}"
-    wants_zip = _wants_zip(response_format, request.headers.get("accept"))
+    accept_header = request.headers.get("accept")
+    wants_zip = _wants_zip(response_format, accept_header)
+    wants_json = False if wants_zip else _wants_json(response_format, accept_header)
 
     def cleanup(extra_path: str | None = None) -> None:
         for path in (tmp_path, extra_path):
@@ -127,10 +142,32 @@ async def convert_pdf(
 
     zip_path: str | None = None
 
+    try:
+        image_paths = _convert_pdf_to_jpeg_paths(tmp_path, temp_images.name)
+    except Exception:
+        cleanup(None)
+        raise
+
+    if wants_json:
+        try:
+            json_payload = []
+            for index, image_path in enumerate(image_paths, start=1):
+                with open(image_path, "rb") as image_file:
+                    encoded = base64.b64encode(image_file.read()).decode("ascii")
+                json_payload.append(
+                    {
+                        "page": index,
+                        "filename": f"page-{index}.jpg",
+                        "data": encoded,
+                    }
+                )
+            return JSONResponse(content=json_payload, media_type="application/json")
+        finally:
+            cleanup(None)
+
     def content() -> Iterable[bytes]:
         nonlocal zip_path
         try:
-            image_paths = _convert_pdf_to_jpeg_paths(tmp_path, temp_images.name)
             if wants_zip:
                 zip_path = _create_zip_archive(image_paths)
                 yield from _stream_file(zip_path)
