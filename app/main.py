@@ -4,14 +4,18 @@ import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Iterable
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import uuid
+import zipfile
+
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pdf2image import convert_from_path
 
 app = FastAPI(title="PDF to JPEG service")
 
-BOUNDARY = "pdf-image-boundary"
+BOUNDARY_PREFIX = "pdf-image-boundary"
 CHUNK_SIZE = 1024 * 1024
+ZIP_FILENAME = "pages.zip"
 
 
 def _convert_pdf_to_jpeg_paths(pdf_path: str, output_dir: str) -> list[str]:
@@ -27,12 +31,12 @@ def _convert_pdf_to_jpeg_paths(pdf_path: str, output_dir: str) -> list[str]:
         raise HTTPException(status_code=500, detail=f"Failed to convert PDF: {exc}") from exc
 
 
-def _multipart_stream(image_paths: Iterable[str]) -> Iterable[bytes]:
+def _multipart_stream(image_paths: Iterable[str], boundary: str) -> Iterable[bytes]:
     for index, image_path in enumerate(image_paths, start=1):
         filename = f"page-{index}.jpg"
         content_length = os.path.getsize(image_path)
         headers = (
-            f"--{BOUNDARY}\r\n"
+            f"--{boundary}\r\n"
             "Content-Type: image/jpeg\r\n"
             f"Content-Disposition: attachment; filename=\"{filename}\"\r\n"
             f"Content-Length: {content_length}\r\n\r\n"
@@ -45,7 +49,40 @@ def _multipart_stream(image_paths: Iterable[str]) -> Iterable[bytes]:
                     break
                 yield chunk
         yield b"\r\n"
-    yield f"--{BOUNDARY}--\r\n".encode("latin-1")
+    yield f"--{boundary}--\r\n".encode("latin-1")
+
+
+def _stream_file(path: str) -> Iterable[bytes]:
+    with open(path, "rb") as file_obj:
+        while True:
+            chunk = file_obj.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+
+
+def _create_zip_archive(image_paths: Iterable[str]) -> str:
+    with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+        zip_path = tmp_zip.name
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for index, image_path in enumerate(image_paths, start=1):
+            arcname = f"page-{index}.jpg"
+            zip_file.write(image_path, arcname=arcname)
+
+    return zip_path
+
+
+def _wants_zip(response_format: str | None, accept_header: str | None) -> bool:
+    if response_format and response_format.lower() == "zip":
+        return True
+    if not accept_header:
+        return False
+    for item in accept_header.split(","):
+        media_type = item.split(";")[0].strip().lower()
+        if media_type in {"application/zip", "application/x-zip-compressed"}:
+            return True
+    return False
 
 
 async def _write_upload_to_tempfile(upload: UploadFile) -> str:
@@ -59,7 +96,11 @@ async def _write_upload_to_tempfile(upload: UploadFile) -> str:
 
 
 @app.post("/convert")
-async def convert_pdf(file: UploadFile = File(...)) -> StreamingResponse:
+async def convert_pdf(
+    request: Request,
+    response_format: str | None = Query(default=None, alias="response_format"),
+    file: UploadFile = File(...),
+) -> StreamingResponse:
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
@@ -71,23 +112,36 @@ async def convert_pdf(file: UploadFile = File(...)) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     temp_images = TemporaryDirectory()
+    boundary = f"{BOUNDARY_PREFIX}-{uuid.uuid4().hex}"
+    wants_zip = _wants_zip(response_format, request.headers.get("accept"))
 
-    def cleanup() -> None:
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
+    def cleanup(extra_path: str | None = None) -> None:
+        for path in (tmp_path, extra_path):
+            if not path:
+                continue
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
         temp_images.cleanup()
 
+    zip_path: str | None = None
+
     def content() -> Iterable[bytes]:
+        nonlocal zip_path
         try:
             image_paths = _convert_pdf_to_jpeg_paths(tmp_path, temp_images.name)
-            yield from _multipart_stream(image_paths)
+            if wants_zip:
+                zip_path = _create_zip_archive(image_paths)
+                yield from _stream_file(zip_path)
+            else:
+                yield from _multipart_stream(image_paths, boundary)
         finally:
-            cleanup()
+            cleanup(zip_path)
 
-    media_type = f"multipart/mixed; boundary={BOUNDARY}"
-    return StreamingResponse(content(), media_type=media_type)
+    media_type = "application/zip" if wants_zip else f"multipart/mixed; boundary={boundary}"
+    headers = {"Content-Disposition": f'attachment; filename="{ZIP_FILENAME}"'} if wants_zip else None
+    return StreamingResponse(content(), media_type=media_type, headers=headers)
 
 
 @app.get("/healthz")
