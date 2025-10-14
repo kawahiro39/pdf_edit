@@ -79,9 +79,14 @@ async def convert_pdf(file: UploadFile = File(...)) -> StreamingResponse:
             pass
         temp_images.cleanup()
 
+    try:
+        image_paths = _convert_pdf_to_jpeg_paths(tmp_path, temp_images.name)
+    except Exception:
+        cleanup()
+        raise
+
     def content() -> Iterable[bytes]:
         try:
-            image_paths = _convert_pdf_to_jpeg_paths(tmp_path, temp_images.name)
             yield from _multipart_stream(image_paths)
         finally:
             cleanup()
