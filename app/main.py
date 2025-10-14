@@ -154,11 +154,12 @@ async def convert_pdf(
             for index, image_path in enumerate(image_paths, start=1):
                 with open(image_path, "rb") as image_file:
                     encoded = base64.b64encode(image_file.read()).decode("ascii")
+                encoded_uri = f"data:image/jpeg;base64,{encoded}"
                 json_payload.append(
                     {
                         "page": index,
                         "filename": f"page-{index}.jpg",
-                        "data": encoded,
+                        "data": encoded_uri,
                     }
                 )
             return JSONResponse(content=json_payload, media_type="application/json")

@@ -50,7 +50,7 @@
      {
        "page": 1,
        "filename": "page-1.jpg",
-       "data": "<Base64エンコードされたJPEG>"
+       "data": "data:image/jpeg;base64,<Base64エンコードされたJPEG>"
      }
    ]
    ```
