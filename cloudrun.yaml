@@ -1,0 +1,18 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: pdf-to-jpeg
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/PROJECT_ID/pdf-to-jpeg
+          env:
+            - name: POPPLER_PATH
+              value: /usr/bin
+          ports:
+            - containerPort: 8080
+      containerConcurrency: 80
+  traffic:
+    - latestRevision: true
+      percent: 100
