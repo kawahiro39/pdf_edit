@@ -32,7 +32,7 @@ RUN apt-get update \
         libcairo2 \
         libasound2 \
         fonts-liberation \
-        fonts-ubuntu \
+        fonts-dejavu \
         fonts-unifont \
     && rm -rf /var/lib/apt/lists/*
 
