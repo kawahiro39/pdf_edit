@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
+from io import BytesIO
+from json import JSONDecodeError
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Iterable
 
@@ -11,6 +14,11 @@ import zipfile
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pdf2image import convert_from_path
+from playwright.async_api import (
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 app = FastAPI(title="PDF to JPEG service")
 
@@ -98,6 +106,36 @@ def _wants_json(response_format: str | None, accept_header: str | None) -> bool:
     return False
 
 
+def _require_http_url(value: str | None) -> str:
+    if not value:
+        raise HTTPException(status_code=400, detail="URL parameter is required")
+    if not value.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+    return value
+
+
+async def _capture_url_screenshot(url: str) -> bytes:
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+            try:
+                context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+                try:
+                    page = await context.new_page()
+                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                    return await page.screenshot(type="jpeg", quality=90)
+                finally:
+                    await context.close()
+            finally:
+                await browser.close()
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to capture screenshot: {exc}") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unexpected screenshot error: {exc}") from exc
+
+
 async def _write_upload_to_tempfile(upload: UploadFile) -> str:
     with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         while True:
@@ -106,6 +144,39 @@ async def _write_upload_to_tempfile(upload: UploadFile) -> str:
                 break
             tmp_file.write(chunk)
         return tmp_file.name
+
+
+@app.post("/screenshot")
+async def screenshot(request: Request, url: str | None = Query(default=None)) -> StreamingResponse:
+    body_url: str | None = None
+
+    if url is None:
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                payload = json.loads(raw_body)
+            except JSONDecodeError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            if isinstance(payload, dict):
+                body_url = payload.get("url")
+    target_url = _require_http_url(url or body_url)
+
+    image_bytes = await _capture_url_screenshot(target_url)
+    buffer = BytesIO(image_bytes)
+
+    def content() -> Iterable[bytes]:
+        try:
+            buffer.seek(0)
+            while True:
+                chunk = buffer.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            buffer.close()
+
+    headers = {"Content-Disposition": 'inline; filename="screenshot.jpg"'}
+    return StreamingResponse(content(), media_type="image/jpeg", headers=headers)
 
 
 @app.post("/convert")
