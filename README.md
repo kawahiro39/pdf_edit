@@ -154,7 +154,7 @@ gcloud run services replace cloudrun.yaml
 ## 依存関係とランタイム要件
 - Python 3.11
 - `fastapi`, `uvicorn[standard]`, `pdf2image`, `Pillow`
-- Webページのキャプチャには `playwright` と Chromium ランタイムが必要です（Dockerfileで `playwright install --with-deps chromium` を実行します）。
+- Webページのキャプチャには `playwright` と Chromium ランタイムが必要です（Dockerfileで必要なシステムライブラリとフォントをインストールしたうえで `playwright install chromium` を実行します）。
 - PDF変換には`pdftoppm`を含む `poppler-utils` が必要です（Dockerfileでインストール済み）。
 - Cloud Runやローカル環境で長時間稼働させる場合、十分な一時ディスク領域があることを確認してください。
 
