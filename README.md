@@ -4,6 +4,7 @@
 
 ## 主な特徴
 - `pdf2image` と `Pillow` を利用した高品質なPDF→JPEG変換
+- PlaywrightによるWebページのスクリーンショット取得（JPEG形式）
 - 1ページずつのマルチパートレスポンス、ZIPアーカイブでの一括ダウンロード、Base64エンコードされたJSONレスポンスに対応
 - DockerfileとCloud Runマニフェストを同梱し、Google Cloud Runへのデプロイを容易に実行可能
 - `/healthz` エンドポイントでのヘルスチェックに対応
@@ -55,6 +56,22 @@
    ]
    ```
 
+5. Webページのスクリーンショットを取得する場合は、URLをクエリまたはJSONで指定します。
+   ```bash
+   curl -X POST \
+     "http://localhost:8080/screenshot?url=https://example.com" \
+     -o example.jpg
+   ```
+   JSONボディで送信する例:
+   ```bash
+   curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://www.wikipedia.org/"}' \
+     http://localhost:8080/screenshot \
+     -o wikipedia.jpg
+   ```
+   いずれもJPEGファイルが得られるので、保存された画像を開いて表示を確認してください。
+
 ## API 仕様
 ### `POST /convert`
 - リクエスト形式: `multipart/form-data`
@@ -67,6 +84,31 @@
 
 ### `GET /healthz`
 - サービス稼働確認用エンドポイント。`{"status": "ok"}` を返します。
+
+### `POST /screenshot`
+- リクエスト形式: クエリパラメーター `url` もしくは JSON ボディ `{"url": "https://example.com"}`
+- ビューポート: 1920×1080（Chromiumヘッドレス）
+- レスポンス: `image/jpeg`（`StreamingResponse` を通じた逐次配信）。`Content-Disposition: inline; filename="screenshot.jpg"`
+- 制限事項:
+  - `http://` または `https://` で始まるURLのみ対応
+  - ページ読み込みがタイムアウト・失敗した場合はHTTP 400を返却
+  - 認証が必要なページやボット対策を行っているページでは取得に失敗する場合があります
+
+ローカル確認例:
+```bash
+curl -X POST \
+  "http://localhost:8080/screenshot?url=https://example.com" \
+  -o example.jpg
+```
+JSONボディで指定したい場合:
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.wikipedia.org/"}' \
+  http://localhost:8080/screenshot \
+  -o wikipedia.jpg
+```
+レスポンスはいずれもJPEGバイナリです。取得した画像ファイルを開いて内容を確認してください。
 
 ## Bubbleでの利用ガイド
 1. **API Connector プラグインを利用**
@@ -112,6 +154,7 @@ gcloud run services replace cloudrun.yaml
 ## 依存関係とランタイム要件
 - Python 3.11
 - `fastapi`, `uvicorn[standard]`, `pdf2image`, `Pillow`
+- Webページのキャプチャには `playwright` と Chromium ランタイムが必要です（Dockerfileで `playwright install --with-deps chromium` を実行します）。
 - PDF変換には`pdftoppm`を含む `poppler-utils` が必要です（Dockerfileでインストール済み）。
 - Cloud Runやローカル環境で長時間稼働させる場合、十分な一時ディスク領域があることを確認してください。
 
