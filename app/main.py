@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import os
-from io import BytesIO
-from json import JSONDecodeError
-from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import Iterable
-
+import shutil
+import subprocess
 import uuid
 import zipfile
+from io import BytesIO
+from json import JSONDecodeError
+from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
+from typing import Iterable
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -25,6 +26,137 @@ app = FastAPI(title="PDF to JPEG service")
 BOUNDARY_PREFIX = "pdf-image-boundary"
 CHUNK_SIZE = 1024 * 1024
 ZIP_FILENAME = "pages.zip"
+
+PDF_EXTENSIONS = {".pdf"}
+DOCUMENT_EXTENSIONS = {".doc", ".docx"}
+SPREADSHEET_EXTENSIONS = {".xls", ".xlsx"}
+PRESENTATION_EXTENSIONS = {".ppt", ".pptx"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
+
+SUPPORTED_EXTENSIONS = (
+    PDF_EXTENSIONS
+    | DOCUMENT_EXTENSIONS
+    | SPREADSHEET_EXTENSIONS
+    | PRESENTATION_EXTENSIONS
+    | VIDEO_EXTENSIONS
+)
+
+
+def _get_upload_suffix(upload: UploadFile) -> str:
+    if upload.filename:
+        _, ext = os.path.splitext(upload.filename)
+        if ext:
+            return ext.lower()
+
+    content_type = (upload.content_type or "").lower()
+    content_type_mapping = {
+        "application/pdf": ".pdf",
+        "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-powerpoint": ".ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/x-msvideo": ".avi",
+    }
+
+    return content_type_mapping.get(content_type, "")
+
+
+def _categorize_extension(suffix: str) -> str:
+    if suffix in PDF_EXTENSIONS:
+        return "pdf"
+    if suffix in DOCUMENT_EXTENSIONS | SPREADSHEET_EXTENSIONS | PRESENTATION_EXTENSIONS:
+        return "office"
+    if suffix in VIDEO_EXTENSIONS:
+        return "video"
+    return "unknown"
+
+
+def _convert_office_to_pdf(source_path: str) -> tuple[str, str]:
+    output_dir = mkdtemp()
+    commands = ("libreoffice", "soffice")
+    stdout_data = stderr_data = ""
+
+    for executable in commands:
+        try:
+            result = subprocess.run(
+                [
+                    executable,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    output_dir,
+                    source_path,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError as exc:
+            stderr_data = exc.stderr.decode("utf-8", errors="ignore")
+            stdout_data = exc.stdout.decode("utf-8", errors="ignore")
+            shutil.rmtree(output_dir, ignore_errors=True)
+            detail = stderr_data.strip() or stdout_data.strip() or "Unknown conversion error"
+            raise HTTPException(status_code=500, detail=f"Failed to convert document to PDF: {detail}") from exc
+        else:
+            stdout_data = result.stdout.decode("utf-8", errors="ignore")
+            stderr_data = result.stderr.decode("utf-8", errors="ignore")
+            break
+    else:  # pragma: no cover - defensive branch
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=500,
+            detail="LibreOffice (libreoffice or soffice) is required for document conversion",
+        )
+
+    base_name = os.path.splitext(os.path.basename(source_path))[0] + ".pdf"
+    pdf_path = os.path.join(output_dir, base_name)
+
+    if not os.path.exists(pdf_path):
+        detail = stderr_data.strip() or stdout_data.strip() or "PDF file was not created"
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Failed to locate converted PDF: {detail}")
+
+    return pdf_path, output_dir
+
+
+def _extract_video_frame(video_path: str, output_dir: str) -> list[str]:
+    output_path = os.path.join(output_dir, "frame-1.jpg")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                video_path,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                output_path,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - external dependency
+        raise HTTPException(status_code=500, detail="FFmpeg is required for video conversion") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode("utf-8", errors="ignore").strip()
+        if not detail:
+            detail = exc.stdout.decode("utf-8", errors="ignore").strip()
+        raise HTTPException(status_code=500, detail=f"Failed to extract video frame: {detail}") from exc
+
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=500, detail="Video frame extraction did not produce an image")
+
+    return [output_path]
 
 
 def _convert_pdf_to_jpeg_paths(pdf_path: str, output_dir: str) -> list[str]:
@@ -136,8 +268,9 @@ async def _capture_url_screenshot(url: str) -> bytes:
         raise HTTPException(status_code=500, detail=f"Unexpected screenshot error: {exc}") from exc
 
 
-async def _write_upload_to_tempfile(upload: UploadFile) -> str:
-    with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+async def _write_upload_to_tempfile(upload: UploadFile, suffix: str) -> str:
+    suffix = suffix if suffix.startswith(".") else f".{suffix}" if suffix else ""
+    with NamedTemporaryFile(delete=False, suffix=suffix or "") as tmp_file:
         while True:
             chunk = await upload.read(CHUNK_SIZE)
             if not chunk:
@@ -185,10 +318,16 @@ async def convert_pdf(
     response_format: str | None = Query(default=None, alias="response_format"),
     file: UploadFile = File(...),
 ) -> StreamingResponse:
-    if file.content_type not in {"application/pdf", "application/octet-stream"}:
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    suffix = _get_upload_suffix(file)
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only PDF, Word, Excel, PowerPoint, and selected video files are supported"
+            ),
+        )
 
-    tmp_path = await _write_upload_to_tempfile(file)
+    tmp_path = await _write_upload_to_tempfile(file, suffix)
     await file.close()
 
     if os.path.getsize(tmp_path) == 0:
@@ -201,23 +340,44 @@ async def convert_pdf(
     wants_zip = _wants_zip(response_format, accept_header)
     wants_json = False if wants_zip else _wants_json(response_format, accept_header)
 
-    def cleanup(extra_path: str | None = None) -> None:
-        for path in (tmp_path, extra_path):
+    cleanup_dirs: list[str] = []
+
+    def cleanup(*extra_paths: str | None) -> None:
+        for path in (tmp_path, *extra_paths):
             if not path:
                 continue
             try:
                 os.unlink(path)
-            except FileNotFoundError:
+            except (FileNotFoundError, IsADirectoryError):
                 pass
+        for directory in cleanup_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
         temp_images.cleanup()
 
     zip_path: str | None = None
 
-    try:
-        image_paths = _convert_pdf_to_jpeg_paths(tmp_path, temp_images.name)
-    except Exception:
+    category = _categorize_extension(suffix)
+
+    if category == "unknown":
         cleanup(None)
-        raise
+        raise HTTPException(status_code=400, detail="Unsupported file extension")
+
+    if category == "video":
+        try:
+            image_paths = _extract_video_frame(tmp_path, temp_images.name)
+        except Exception:
+            cleanup(None)
+            raise
+    else:
+        try:
+            pdf_path = tmp_path
+            if category == "office":
+                pdf_path, output_dir = _convert_office_to_pdf(tmp_path)
+                cleanup_dirs.append(output_dir)
+            image_paths = _convert_pdf_to_jpeg_paths(pdf_path, temp_images.name)
+        except Exception:
+            cleanup(None)
+            raise
 
     if wants_json:
         try:
