@@ -4,6 +4,7 @@
 
 ## 主な特徴
 - `pdf2image` と `Pillow` を利用した高品質なPDF→JPEG変換
+- Word / Excel / PowerPoint / 動画（先頭フレーム）のアップロードに対応し、自動的にPDF/画像へ変換
 - PlaywrightによるWebページのスクリーンショット取得（JPEG形式）
 - 1ページずつのマルチパートレスポンス、ZIPアーカイブでの一括ダウンロード、Base64エンコードされたJSONレスポンスに対応
 - DockerfileとCloud Runマニフェストを同梱し、Google Cloud Runへのデプロイを容易に実行可能
@@ -75,12 +76,12 @@
 ## API 仕様
 ### `POST /convert`
 - リクエスト形式: `multipart/form-data`
-  - フィールド名: `file`（PDFファイルを添付）
+  - フィールド名: `file`（PDF / Word / Excel / PowerPoint / 動画ファイルを添付）
 - レスポンス:
   - 既定: `multipart/mixed`、各パートがJPEG画像
   - `Accept: application/zip` もしくは `response_format=zip` 指定時: `application/zip`
   - `Accept: application/json` もしくは `response_format=json` 指定時: JSON配列（各要素にページ番号・ファイル名・Base64データを含む）
-- エラー: PDF以外のファイル、または空ファイルを送信した場合はHTTP 400を返します。
+- エラー: 未対応の拡張子、または空ファイルを送信した場合はHTTP 400を返します。
 
 ### `GET /healthz`
 - サービス稼働確認用エンドポイント。`{"status": "ok"}` を返します。
@@ -156,6 +157,8 @@ gcloud run services replace cloudrun.yaml
 - `fastapi`, `uvicorn[standard]`, `pdf2image`, `Pillow`
 - Webページのキャプチャには `playwright` と Chromium ランタイムが必要です（Dockerfileで必要なシステムライブラリとフォントをインストールしたうえで `playwright install chromium` を実行します）。
 - PDF変換には`pdftoppm`を含む `poppler-utils` が必要です（Dockerfileでインストール済み）。
+- Word / Excel / PowerPoint の変換には LibreOffice (`libreoffice` または `soffice`) のコマンドライン実行環境が必要です。
+- 動画から静止画を生成するために `ffmpeg` コマンドが必要です。
 - Cloud Runやローカル環境で長時間稼働させる場合、十分な一時ディスク領域があることを確認してください。
 
 Bubbleをはじめとするノーコードツールからのドキュメント処理フローにご活用ください。
