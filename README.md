@@ -81,6 +81,9 @@
   - 既定: `multipart/mixed`、各パートがJPEG画像
   - `Accept: application/zip` もしくは `response_format=zip` 指定時: `application/zip`
   - `Accept: application/json` もしくは `response_format=json` 指定時: JSON配列（各要素にページ番号・ファイル名・Base64データを含む）
+- オプションのクエリパラメーター:
+  - `image_width` / `image_height`: 生成するJPEGの幅・高さ（ピクセル）。一方のみ指定した場合はもう一方の値を保ったままアスペクト比を維持します。
+  - `image_quality`: JPEG画質（1〜100）。PDF/Office変換ではPopplerのJPEG出力に適用され、動画からの静止画抽出ではFFmpegの画質パラメーターにマッピングされます。
 - エラー: 未対応の拡張子、または空ファイルを送信した場合はHTTP 400を返します。
 
 ### `GET /healthz`

@@ -126,21 +126,44 @@ def _convert_office_to_pdf(source_path: str) -> tuple[str, str]:
     return pdf_path, output_dir
 
 
-def _extract_video_frame(video_path: str, output_dir: str) -> list[str]:
+def _extract_video_frame(
+    video_path: str,
+    output_dir: str,
+    width: int | None = None,
+    height: int | None = None,
+    quality: int | None = None,
+) -> list[str]:
     output_path = os.path.join(output_dir, "frame-1.jpg")
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+    ]
+
+    if width is not None or height is not None:
+        if width and height:
+            scale_value = f"scale={width}:{height}"
+        elif width:
+            scale_value = f"scale={width}:-1"
+        else:
+            scale_value = f"scale=-1:{height}"
+        command.extend(["-vf", scale_value])
+
+    if quality is not None:
+        mapped_quality = max(1, min(31, int(round(31 - (quality / 100) * 30))))
+        command.extend(["-q:v", str(mapped_quality)])
+    else:
+        command.extend(["-q:v", "2"])
+
+    command.append(output_path)
+
     try:
         subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                video_path,
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                output_path,
-            ],
+            command,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -159,7 +182,18 @@ def _extract_video_frame(video_path: str, output_dir: str) -> list[str]:
     return [output_path]
 
 
-def _convert_pdf_to_jpeg_paths(pdf_path: str, output_dir: str) -> list[str]:
+def _convert_pdf_to_jpeg_paths(
+    pdf_path: str,
+    output_dir: str,
+    width: int | None = None,
+    height: int | None = None,
+    quality: int | None = None,
+) -> list[str]:
+    kwargs: dict[str, object] = {}
+    if width is not None or height is not None:
+        kwargs["size"] = (width or 0, height or 0)
+    if quality is not None:
+        kwargs["jpegopt"] = {"quality": quality}
     try:
         return convert_from_path(
             pdf_path,
@@ -167,6 +201,7 @@ def _convert_pdf_to_jpeg_paths(pdf_path: str, output_dir: str) -> list[str]:
             output_folder=output_dir,
             output_file="page",
             paths_only=True,
+            **kwargs,
         )
     except Exception as exc:  # pragma: no cover - defensive logging
         raise HTTPException(status_code=500, detail=f"Failed to convert PDF: {exc}") from exc
@@ -316,6 +351,9 @@ async def screenshot(request: Request, url: str | None = Query(default=None)) ->
 async def convert_pdf(
     request: Request,
     response_format: str | None = Query(default=None, alias="response_format"),
+    image_width: int | None = Query(default=None, ge=1, le=10000),
+    image_height: int | None = Query(default=None, ge=1, le=10000),
+    image_quality: int | None = Query(default=None, ge=1, le=100),
     file: UploadFile = File(...),
 ) -> StreamingResponse:
     suffix = _get_upload_suffix(file)
@@ -364,7 +402,13 @@ async def convert_pdf(
 
     if category == "video":
         try:
-            image_paths = _extract_video_frame(tmp_path, temp_images.name)
+            image_paths = _extract_video_frame(
+                tmp_path,
+                temp_images.name,
+                width=image_width,
+                height=image_height,
+                quality=image_quality,
+            )
         except Exception:
             cleanup(None)
             raise
@@ -374,7 +418,13 @@ async def convert_pdf(
             if category == "office":
                 pdf_path, output_dir = _convert_office_to_pdf(tmp_path)
                 cleanup_dirs.append(output_dir)
-            image_paths = _convert_pdf_to_jpeg_paths(pdf_path, temp_images.name)
+            image_paths = _convert_pdf_to_jpeg_paths(
+                pdf_path,
+                temp_images.name,
+                width=image_width,
+                height=image_height,
+                quality=image_quality,
+            )
         except Exception:
             cleanup(None)
             raise
